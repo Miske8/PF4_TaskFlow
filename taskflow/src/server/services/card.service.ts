@@ -7,12 +7,23 @@ import {
 } from "@/server/auth/permissions";
 import { ValidationError } from "@/server/auth/errors";
 import { computeOrder } from "@/lib/positions";
+import { emitBoardEvent } from "@/server/realtime/pusher";
 import type { CreateCardInput, UpdateCardInput } from "@/lib/validations/card.schema";
 
 /**
- * TaskFlow — service Card — Étape 10 (CRUD) + Étape 14 (labels & échéance).
- * Chaque méthode : GATE d'autorisation (via le board parent) → validation → data.
+ * TaskFlow — service Card — Étape 10 (CRUD) + Étape 14 (labels & échéance)
+ * + Étape 16 (émission temps réel après chaque mutation réussie).
+ * Chaque méthode : GATE d'autorisation (via le board parent) → validation → data → event.
  */
+
+/** Résout le board parent d'une carte (pour l'émission sur le bon canal). */
+async function cardBoardId(cardId: string): Promise<string | null> {
+  const row = await db.card.findUnique({
+    where: { id: cardId },
+    select: { list: { select: { boardId: true } } },
+  });
+  return row?.list.boardId ?? null;
+}
 
 /* ------------------------------------------------------------------ */
 /* DTO                                                                 */
@@ -63,7 +74,7 @@ function toDto(card: Prisma.CardGetPayload<{ select: typeof cardDtoSelect }>): C
 
 /** POST /api/lists/[listId]/cards — créer une carte en fin de colonne. */
 export async function createCard(listId: string, input: CreateCardInput) {
-  await requireListAccess(listId, "card:create"); // owner ET member
+  const ctx = await requireListAccess(listId, "card:create"); // owner ET member
 
   const last = await db.card.findFirst({
     where: { listId },
@@ -75,6 +86,12 @@ export async function createCard(listId: string, input: CreateCardInput) {
   const created = await db.card.create({
     data: { listId, title: input.title, order },
     select: cardDtoSelect,
+  });
+  // ⏱ Étape 16 : temps réel best-effort (no-op si Pusher non configuré).
+  void emitBoardEvent(ctx.boardId, "card:created", ctx.userId, {
+    cardId: created.id,
+    listId,
+    title: created.title,
   });
   return toDto(created);
 }
@@ -93,7 +110,7 @@ export async function getCard(cardId: string) {
  * convertit ici (null = retirer). Bascule « terminée » : completedAt non nul.
  */
 export async function updateCard(cardId: string, input: UpdateCardInput) {
-  await requireCardAccess(cardId, "card:update");
+  const ctx = await requireCardAccess(cardId, "card:update");
 
   const data: Prisma.CardUpdateInput = {};
   if (input.title !== undefined) data.title = input.title;
@@ -104,13 +121,22 @@ export async function updateCard(cardId: string, input: UpdateCardInput) {
   }
 
   const updated = await db.card.update({ where: { id: cardId }, data, select: cardDtoSelect });
+  void emitBoardEvent(ctx.boardId, "card:updated", ctx.userId, {
+    cardId,
+    listId: updated.listId,
+  });
   return toDto(updated);
 }
 
 /** DELETE /api/cards/[cardId] — cascade automatique commentaires/labels. */
 export async function deleteCard(cardId: string) {
-  await requireCardAccess(cardId, "card:delete");
+  const boardId = await cardBoardId(cardId);
+  const ctx = await requireCardAccess(cardId, "card:delete");
+  const listId = ctx.card.list.id;
   await db.card.delete({ where: { id: cardId } });
+  if (boardId) {
+    void emitBoardEvent(boardId, "card:deleted", ctx.userId, { cardId, listId });
+  }
   return { ok: true as const };
 }
 
@@ -136,8 +162,9 @@ export async function moveCard(
 ) {
   const card = await db.card.findUnique({ where: { id: cardId }, select: cardBoardSelect });
   if (!card) throw new ValidationError("Carte introuvable.");
+  const fromListId = card.listId;
   // GATE d'autorisation sur le board parent + résolution du board source.
-  await requireBoardAccess(card.list.boardId, "card:update");
+  const ctx = await requireBoardAccess(card.list.boardId, "card:update");
 
   const target = await db.list.findFirst({
     where: { id: input.toListId, boardId: card.list.boardId },
@@ -150,6 +177,11 @@ export async function moveCard(
     where: { id: cardId },
     data: { listId: input.toListId, order },
     select: cardDtoSelect,
+  });
+  void emitBoardEvent(ctx.boardId, "card:moved", ctx.userId, {
+    cardId,
+    fromListId,
+    toListId: input.toListId,
   });
   return toDto(updated);
 }
