@@ -1,22 +1,23 @@
-import { Suspense } from "react";
 import type { Metadata } from "next";
-import { requireUser } from "@/server/auth/session";
+import { Suspense } from "react";
+import { requireUserId } from "@/server/auth/permissions";
+import { listAccessibleBoards } from "@/server/services/board.service";
+import { BoardsDashboard } from "@/features/boards/components/boards-dashboard";
 
-export const metadata: Metadata = { title: "Tableaux" };
+export const metadata: Metadata = { title: "Tableaux — TaskFlow" };
 
+/**
+ * TaskFlow — page Dashboard (Étape 7).
+ * Server component dynamique : vérifie la session (`requireUserId` → redirect
+ * géré par le proxy) et précharge les boards accessibles (owner + member) pour
+ * hydrater le cache TanStack Query côté client (première paint sans spinner).
+ */
 async function DashboardContent() {
-  const user = await requireUser();
-  return (
-    <section className="space-y-2">
-      <h1 className="text-2xl font-semibold tracking-tight">Mes tableaux</h1>
-      <p className="text-sm text-zinc-500 dark:text-zinc-400">
-        Bienvenue {user.name ?? user.email} — authentification OK ✔ (le CRUD des tableaux arrive à l’étape 7).
-      </p>
-    </section>
-  );
+  const userId = await requireUserId();
+  const initialBoards = await listAccessibleBoards(userId);
+  return <BoardsDashboard initialBoards={initialBoards} />;
 }
 
-/** Placeholder temporaire — le vrai dashboard arrive à l'Étape 7. */
 export default function DashboardPage() {
   return (
     <Suspense fallback={<div className="h-24 animate-pulse rounded-xl bg-zinc-200 dark:bg-zinc-800" />}>
