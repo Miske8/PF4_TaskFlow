@@ -1,0 +1,12 @@
+// TaskFlow — schéma Prisma
+// Étape 1 : initialisation (datasource PostgreSQL + generator client).
+// Les modèles (User, Board, Column, Card, Label, Comment, Membership…) seront ajoutés à l'Étape 3.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
