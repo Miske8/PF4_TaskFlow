@@ -16,8 +16,9 @@ import type { CreateCardInput, UpdateCardInput } from "@/lib/validations/card.sc
  * Chaque méthode : GATE d'autorisation (via le board parent) → validation → data → event.
  */
 
-/** Résout le board parent d'une carte (pour l'émission sur le bon canal). */
-async function cardBoardId(cardId: string): Promise<string | null> {
+/** Résout le board parent d'une carte (utilitaire — les services utilisent
+ *  préférentiellement requireCardAccess qui remonte déjà list → board). */
+export async function cardBoardId(cardId: string): Promise<string | null> {
   const row = await db.card.findUnique({
     where: { id: cardId },
     select: { list: { select: { boardId: true } } },
@@ -130,13 +131,11 @@ export async function updateCard(cardId: string, input: UpdateCardInput) {
 
 /** DELETE /api/cards/[cardId] — cascade automatique commentaires/labels. */
 export async function deleteCard(cardId: string) {
-  const boardId = await cardBoardId(cardId);
   const ctx = await requireCardAccess(cardId, "card:delete");
+  const boardId = ctx.card.list.boardId;
   const listId = ctx.card.list.id;
   await db.card.delete({ where: { id: cardId } });
-  if (boardId) {
-    void emitBoardEvent(boardId, "card:deleted", ctx.userId, { cardId, listId });
-  }
+  void emitBoardEvent(boardId, "card:deleted", ctx.userId, { cardId, listId });
   return { ok: true as const };
 }
 

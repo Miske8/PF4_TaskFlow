@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canAll, isBoardMember, type BoardRoleValue } from "@/lib/permissions";
+import { canAll, isBoardMember, type ActorRole, type BoardAction } from "@/lib/permissions";
 
 /**
  * TaskFlow — tests de la couche d'autorisation serveur (Étape 5 → Étape 19).
@@ -18,7 +18,7 @@ describe("isBoardMember", () => {
 
   it("refuse un utilisateur sans membership (extérieur)", () => {
     expect(isBoardMember(null)).toBe(false);
-    expect(isBoardMember(undefined)).toBe(false);
+    expect(isBoardMember(undefined as unknown as ActorRole)).toBe(false);
   });
 });
 
@@ -37,7 +37,7 @@ describe("canAll — conjonction d'actions", () => {
   });
 
   it("un extérieur échoue sur toute conjunction non vide", () => {
-    const outsider = null as unknown as BoardRoleValue;
+    const outsider = null as ActorRole;
     expect(canAll(outsider, ["board:read"])).toBe(false);
   });
 
@@ -58,7 +58,7 @@ describe("règles produit critiques (récap portfolio)", () => {
   });
 
   it("owner ET member partagent l'édition listes/cartes", () => {
-    const shared = ["list:create", "list:update", "list:delete", "card:create", "card:update", "card:delete"];
+    const shared: BoardAction[] = ["list:create", "list:update", "list:delete", "card:create", "card:update", "card:delete"];
     for (const role of ["OWNER", "MEMBER"] as const) {
       expect(canAll(role, shared)).toBe(true);
     }

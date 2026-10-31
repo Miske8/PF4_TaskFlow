@@ -1,4 +1,4 @@
-import jwt from "next-auth/jwt";
+import { getToken } from "next-auth/jwt";
 import { NextResponse } from "next/server";
 import { db } from "@/server/db/prisma";
 import { canAccessBoardChannel } from "@/server/realtime/channels";
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
   try {
     // 1. Identité : décryptage direct du JWT Auth.js (aucune dépendance
     //    Prisma/Node → handler compatible edge/runtime standard).
-    const token = await jwt.getToken({
+    const token = await getToken({
       req: request,
       secret: process.env.AUTH_SECRET,
     });

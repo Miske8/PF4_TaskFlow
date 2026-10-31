@@ -124,7 +124,11 @@ export async function requireBoardOwner(boardId: string): Promise<BoardAccessCon
 /* ------------------------------------------------------------------ */
 
 const listBoardSelect = { id: true, boardId: true } satisfies Prisma.ListSelect;
-const cardBoardSelect = { id: true, list: { select: { boardId: true } } } satisfies Prisma.CardSelect;
+const cardBoardSelect = {
+  id: true,
+  listId: true,
+  list: { select: { id: true, boardId: true } },
+} satisfies Prisma.CardSelect;
 
 /** La liste appartient-elle à un board accessible ? Retourne la liste + accès. */
 export async function requireListAccess(listId: string, action: BoardAction) {
