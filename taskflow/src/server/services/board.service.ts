@@ -23,9 +23,17 @@ export async function listAccessibleBoards(userId: string) {
       isArchived: true,
       updatedAt: true,
       ownerId: true,
+      // Rôle de l'utilisateur sur ce board (OWNER via la membership créée à la création).
+      members: { where: { userId }, select: { role: true } },
       _count: { select: { lists: true } },
     },
-  });
+  }).then((boards) =>
+    boards.map(({ members, _count, ...board }) => ({
+      ...board,
+      role: members[0]?.role ?? null,
+      listCount: _count.lists,
+    })),
+  );
 }
 
 export async function createBoard(userId: string, input: CreateBoardInput) {

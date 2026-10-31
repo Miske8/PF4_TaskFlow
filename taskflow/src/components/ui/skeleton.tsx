@@ -23,6 +23,34 @@ export function BoardGridSkeleton({ count = 8 }: { count?: number }) {
   );
 }
 
+/** Skeleton d'une carte du dashboard (en-tête + lignes de texte). */
+export function BoardCardSkeleton() {
+  return (
+    <div className="space-y-3 rounded-xl border border-zinc-200 p-4 dark:border-zinc-800">
+      <div className="flex items-start justify-between">
+        <Skeleton className="h-5 w-32" />
+        <Skeleton className="size-7 rounded-lg" />
+      </div>
+      <Skeleton className="h-4 w-full" />
+      <div className="flex items-center justify-between">
+        <Skeleton className="h-4 w-16" />
+        <Skeleton className="h-4 w-20" />
+      </div>
+    </div>
+  );
+}
+
+/** Variante grille avec les skeletons détaillés de cartes board. */
+export function BoardCardGridSkeleton({ count = 8 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      {Array.from({ length: count }).map((_, i) => (
+        <BoardCardSkeleton key={i} />
+      ))}
+    </div>
+  );
+}
+
 /** Colonne kanban en chargement (page board, étapes 8+). */
 export function ColumnSkeleton() {
   return (
