@@ -2,6 +2,7 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/server/db/prisma";
 import { requireBoardAccess, requireListAccess } from "@/server/auth/permissions";
 import { NotFoundError, ValidationError } from "@/server/auth/errors";
+import { emitBoardEvent } from "@/server/realtime/pusher";
 import {
   computeOrder,
   linearizeOrders,
@@ -10,10 +11,16 @@ import {
 import type { CreateListInput, RenameListInput } from "@/lib/validations/list.schema";
 
 /**
- * TaskFlow — service List (colonnes) — Étape 9.
+ * TaskFlow — service List (colonnes) — Étape 9 + Étape 16 (temps réel).
  * Chaque méthode commence par un GATE d'autorisation (requireBoardAccess /
  * requireListAccess) avant tout accès data. Positions = fractional indexing.
  */
+
+/** Board parent d'une liste (avant suppression, quand la ligne n'existe plus). */
+async function listBoardId(listId: string): Promise<string | null> {
+  const row = await db.list.findUnique({ where: { id: listId }, select: { boardId: true } });
+  return row?.boardId ?? null;
+}
 
 export const listDtoSelect = {
   id: true,
@@ -57,7 +64,7 @@ export async function listLists(boardId: string) {
  * - ou juste après `afterListId` si fourni (midpoint avec le suivant).
  */
 export async function createList(boardId: string, input: CreateListInput) {
-  await requireBoardAccess(boardId, "list:create"); // owner ET member autorisés
+  const ctx = await requireBoardAccess(boardId, "list:create"); // owner ET member autorisés
 
   let order: number;
 
@@ -88,16 +95,24 @@ export async function createList(boardId: string, input: CreateListInput) {
     data: { boardId, title: input.title, order },
     select: listDtoSelect,
   });
+  void emitBoardEvent(boardId, "list:created", ctx.userId, {
+    listId: created.id,
+    title: created.title,
+  });
   return toDto(created);
 }
 
 /** PATCH : renommer (owner ou member). */
 export async function renameList(listId: string, input: RenameListInput) {
-  await requireListAccess(listId, "list:update");
+  const ctx = await requireListAccess(listId, "list:update");
   const updated = await db.list.update({
     where: { id: listId },
     data: { title: input.title },
     select: listDtoSelect,
+  });
+  void emitBoardEvent(ctx.boardId, "list:updated", ctx.userId, {
+    listId,
+    title: updated.title,
   });
   return toDto(updated);
 }
@@ -108,14 +123,15 @@ export async function renameList(listId: string, input: RenameListInput) {
  * ⚠️ On refuse la dernière colonne restante pour garder un board utilisable.
  */
 export async function deleteList(listId: string) {
-  const { list } = await requireListAccess(listId, "list:delete");
+  const ctx = await requireListAccess(listId, "list:delete");
 
-  const remaining = await db.list.count({ where: { boardId: list.boardId } });
+  const remaining = await db.list.count({ where: { boardId: ctx.boardId } });
   if (remaining <= 1) {
     throw new ValidationError("Impossible de supprimer la dernière colonne du tableau.");
   }
 
   await db.list.delete({ where: { id: listId } });
+  void emitBoardEvent(ctx.boardId, "list:deleted", ctx.userId, { listId });
   return { ok: true as const };
 }
 
@@ -133,7 +149,7 @@ export async function deleteList(listId: string) {
  *     garantit un espacement propre et résilient aux égalités.
  */
 export async function reorderLists(boardId: string, listIds: string[]) {
-  await requireBoardAccess(boardId, "list:update");
+  const ctx = await requireBoardAccess(boardId, "list:update");
 
   const current = await db.list.findMany({
     where: { boardId },
@@ -203,6 +219,10 @@ export async function reorderLists(boardId: string, listIds: string[]) {
       }
     }
   });
+
+  // ⏱ Étape 16 : un seul événement agrégé « list:moved » par reorder ;
+  // le client relit la séquence complète depuis l'API (source de vérité).
+  void emitBoardEvent(boardId, "list:moved", ctx.userId, { listId: listIds[0] ?? "" });
 
   return listLists(boardId);
 }

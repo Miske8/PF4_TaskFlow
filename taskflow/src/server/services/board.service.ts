@@ -1,6 +1,7 @@
 import { db } from "@/server/db/prisma";
 import { requireBoardAccess, requireBoardOwner } from "@/server/auth/permissions";
 import { NotFoundError } from "@/server/auth/errors";
+import { emitBoardEvent } from "@/server/realtime/pusher";
 import type { CreateBoardInput, UpdateBoardInput } from "@/lib/validations/board.schema";
 
 /**
