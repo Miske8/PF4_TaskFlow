@@ -1,19 +1,30 @@
 /**
- * TaskFlow — test d'intégration du service List (Étape 9).
+ * TaskFlow — test d'intégration du service List (Étapes 9 & 19).
  * Exécute la vraie logique métier (positions, permutation exacte, gates)
  * contre PostgreSQL en simulant la session via requireBoardAccess mockée.
- * Lancé manuellement : npx vitest run src/tests/list.service.integration.test.ts
- * (skip si DATABASE_URL absente pour garder la suite CI-safe).
+ *
+ * Isolation (correction Étape 19) : un board FRAIS est créé dans
+ * `beforeEach` et détruit dans `afterEach` — chaque test part donc d'un
+ * board vide, ce qui rend les scénics déterministes et indépendants de
+ * l'état résiduel de la base (les runs précédents pouvaient laisser des
+ * colonnes et faussernt les compteurs → « dernière colonne » etc.).
+ * Skip automatique si DATABASE_URL est absente (suite CI-safe).
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const hasDb = !!process.env.DATABASE_URL;
 
 vi.mock("@/server/auth/permissions", () => ({
-  // Gate neutralisé : on teste ICI la logique de positions, pas l'RBAC
+  // Gate neutralisé : on teste ICI la logique de positions, pas le RBAC
   // (couvert unitairement par permissions.test.ts + étape 5).
-  requireBoardAccess: vi.fn(async () => ({ userId: "u1", boardId: "", role: "OWNER" })),
-  requireListAccess: vi.fn(async (_id: string) => ({ list: { id: _id, boardId: "" }, userId: "u1", boardId: "", role: "OWNER" })),
+  // requireListAccess renvoie le VRAI boardId de la colonne pour que les
+  // compteurs métier (règle « dernière colonne ») soient exacts.
+  requireBoardAccess: vi.fn(async (_boardId: string) => ({ userId: "u1", boardId: _boardId ?? "", role: "OWNER" })),
+  requireListAccess: vi.fn(async (id: string) => {
+    const { db } = await import("@/server/db/prisma");
+    const row = await db.list.findUnique({ where: { id }, select: { boardId: true } });
+    return { list: { id, boardId: row?.boardId ?? "" }, userId: "u1", boardId: row?.boardId ?? "", role: "OWNER" };
+  }),
 }));
 
 import { db } from "@/server/db/prisma";
@@ -26,34 +37,51 @@ import {
 } from "@/server/services/list.service";
 
 let boardId: string;
+let userId: string;
 
 describe.skipIf(!hasDb)("list.service — intégrité des positions (PostgreSQL)", () => {
-  beforeAll(async () => {
+  beforeEach(async () => {
     const user = await db.user.create({
-      data: { email: `lists-${Date.now()}@taskflow.dev`, name: "Test Lists", passwordHash: "x" },
+      data: { email: `lists-${Date.now()}-${Math.random().toString(36).slice(2)}@taskflow.dev`, name: "Test Lists", passwordHash: "x" },
     });
+    userId = user.id;
     const board = await db.board.create({
       data: { name: "Board lists test", ownerId: user.id, members: { create: { userId: user.id, role: "OWNER" } } },
     });
     boardId = board.id;
+    // Board non vide dès le départ : la règle métier interdit de vider
+    // entièrement un board ; les tests qui créent/renomment/ordonnent sont
+    // ainsi autonomes et déterministes.
+    await db.list.createMany({
+      data: [
+        { boardId, title: "Colonne 1", order: 1000 },
+        { boardId, title: "Colonne 2", order: 2000 },
+      ],
+    });
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
+    // Cascade DB (board → lists → cards…) + suppression de l'utilisateur de test.
     await db.board.deleteMany({ where: { id: boardId } });
-    await db.user.deleteMany({ where: { email: { startsWith: `lists-${""}` }, name: "Test Lists" } }).catch(() => {});
+    await db.user.deleteMany({ where: { id: userId } });
   });
 
   it("crée des colonnes avec des orders strictement croissants", async () => {
+    const before = (await listLists(boardId)).map((l) => l.order);
     const a = await createList(boardId, { title: "A" });
     const b = await createList(boardId, { title: "B" });
     const c = await createList(boardId, { title: "C" });
+    // ajout en fin de liste : orders strictement croissants après l'existant
+    expect(a.order).toBeGreaterThan(before[before.length - 1]);
     expect(b.order).toBeGreaterThan(a.order);
     expect(c.order).toBeGreaterThan(b.order);
 
-    // Insertion relative : entre A et B → midpoint exact
-    const mid = await createList(boardId, { title: "A-B", afterListId: a.id });
-    expect(mid.order).toBeGreaterThan(a.order);
-    expect(mid.order).toBeLessThan(b.order);
+    // Insertion relative : après la première colonne existante → midpoint
+    const first = (await listLists(boardId))[0];
+    const second = (await listLists(boardId))[1];
+    const mid = await createList(boardId, { title: "A-B", afterListId: first.id });
+    expect(mid.order).toBeGreaterThan(first.order);
+    expect(mid.order).toBeLessThan(second.order);
   });
 
   it("renomme une colonne", async () => {
@@ -67,8 +95,7 @@ describe.skipIf(!hasDb)("list.service — intégrité des positions (PostgreSQL)
     const reversed = [...lists].reverse().map((l) => l.id);
     const after = await reorderLists(boardId, reversed);
     expect(after.map((l) => l.id)).toEqual(reversed);
-    // Orders proprement linéarisés : GAP, 2*GAP, ...
-    expect(after[0].order).not.toBeGreaterThanOrEqual(after[1].order);
+    // Orders strictement croissants dans le nouvel ordre d'affichage
     for (let i = 1; i < after.length; i++) {
       expect(after[i].order).toBeGreaterThan(after[i - 1].order);
     }
@@ -78,52 +105,74 @@ describe.skipIf(!hasDb)("list.service — intégrité des positions (PostgreSQL)
     const lists = await listLists(boardId);
     const ids = lists.map((l) => l.id);
     await expect(
-      reorderLists(boardId, [...ids.slice(0, -1), "ckyl9p6qj000008z9zzzzzzzz"]),
+      reorderLists(boardId, [...ids.slice(0, -1), "ckyl9p6qj000008z9abcdefghij"]),
     ).rejects.toThrow(/invalide/);
     await expect(reorderLists(boardId, [...ids, ids[0]])).rejects.toThrow(/invalide/);
   });
 
-  it("écriture minimale : un seul UPDATE quand un élément change de place", async () => {
+  it("déplacement réel (milieu → fin) : un seul UPDATE via plan midpoint", async () => {
+    // Scénario dnd-kit typique : une colonne insérée entre deux voisines,
+    // puis déplacée juste avant la dernière → préfixe/suffixe communs,
+    // fenêtre de span 1 → seul l'élément bougé change d'order (1 UPDATE).
+    const anchor = await createList(boardId, { title: "Finale" });
+    const moved = await createList(boardId, { title: "À déplacer", afterListId: anchor.id });
+    await createList(boardId, { title: "Après" });
+
     const lists = await listLists(boardId);
-    if (lists.length < 3) return;
     const before = new Map(lists.map((l) => [l.id, l.order]));
-    // Déplacer le premier en toute fin : seul cet élément change d'order
-    const seq = [...lists.slice(1).map((l) => l.id), lists[0].id];
+    const lastId = lists[lists.length - 1].id;
+
+    const seq = lists.map((l) => l.id).filter((id) => id !== moved.id);
+    seq.splice(seq.indexOf(lastId), 0, moved.id); // ...moved, last...
     const after = await reorderLists(boardId, seq);
+
     let changed = 0;
     for (const l of after) if (before.get(l.id) !== l.order) changed++;
     expect(changed).toBe(1); // écriture minimale garantie par le plan midpoint
+    // et l'invariant d'ordre est conservé
+    const idxMoved = after.findIndex((l) => l.id === moved.id);
+    expect(after[idxMoved].order).toBeGreaterThan(before.get(moved.id)!);
+    expect(after[idxMoved].order).toBeLessThan(after[idxMoved + 1].order);
+  });
+
+  it("relinearization complète quand plusieurs colonnes changent de voisins", async () => {
+    // Déplacer le premier en toute fin ⇒ les autres perdent leur voisin de
+    // gauche ⇒ le service relinéarise tout en GAP..n×GAP (cas multi-onglets).
+    const lists = await listLists(boardId);
+    const seq = [...lists.slice(1).map((l) => l.id), lists[0].id];
+    const after = await reorderLists(boardId, seq);
+    const orders = after.map((l) => l.order);
+    for (let i = 1; i < orders.length; i++) {
+      expect(orders[i]).toBeGreaterThan(orders[i - 1]);
+    }
   });
 
   it("supprime une colonne et refuse la suppression de la dernière", async () => {
     const lists = await listLists(boardId);
-    await deleteList(lists[lists.length - 1].id);
+    const extra = await createList(boardId, { title: "Temporaire" });
+    await deleteList(extra.id);
     const remaining = await listLists(boardId);
-    expect(remaining.length).toBe(lists.length - 1);
+    expect(remaining.length).toBe(lists.length); // créée puis supprimée
 
-    // Ne laisser qu'une colonne puis tenter de la supprimer → ValidationError
-    while ((await listLists(boardId)).length > 1) {
-      const ls = await listLists(boardId);
+    // Vider le board jusqu'à la dernière colonne → ValidationError
+    let ls = await listLists(boardId);
+    while (ls.length > 1) {
       await deleteList(ls[ls.length - 1].id);
+      ls = await listLists(boardId);
     }
-    const last = (await listLists(boardId))[0];
-    await expect(deleteList(last.id)).rejects.toThrow(/dernière colonne/);
+    await expect(deleteList(ls[0].id)).rejects.toThrow(/dernière colonne/);
   });
 
   it("la suppression en cascade retire bien les cartes", async () => {
-    const list = (await listLists(boardId))[0];
-    await db.card.create({ data: { listId: list.id, title: "Carte à cascader", order: 1000 } });
-    await deleteList(list.id);
-    const orphans = await db.card.count({ where: { listId: list.id } });
-    expect(orphans).toBe(0);
-  });
+    // Board frais (beforeEach) → on crée deux colonnes pour ne pas heurter
+    // la règle métier « impossible de supprimer la dernière colonne ».
+    await createList(boardId, { title: "Gardée" });
+    const doomed = await createList(boardId, { title: "À supprimer" });
+    await db.card.create({ data: { listId: doomed.id, title: "Carte à cascader", order: 1000 } });
 
+    await deleteList(doomed.id);
 
-it("la suppression en cascade retire bien les cartes", async () => {
-    const list = (await listLists(boardId))[0];
-    await db.card.create({ data: { listId: list.id, title: "Carte à cascader", order: 1000 } });
-    await deleteList(list.id);
-    const orphans = await db.card.count({ where: { listId: list.id } });
+    const orphans = await db.card.count({ where: { listId: doomed.id } });
     expect(orphans).toBe(0);
   });
 });

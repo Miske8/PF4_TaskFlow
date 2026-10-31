@@ -26,7 +26,9 @@ export const updateCardSchema = z
       .max(5000, "5000 caractères maximum")
       .nullable()
       .optional(),
-    dueDate: z.string().datetime({ offset: true }).datetime({ message: "Date ISO 8601 invalide" }).nullable().optional(),
+    // NB : un seul .datetime() — chaîner deux fois écrase l'option `offset`
+    // (bug détecté par les tests Étape 19 : "+01:00" devenait invalide).
+    dueDate: z.string().datetime({ offset: true, message: "Date ISO 8601 invalide" }).nullable().optional(),
     completedAt: z.string().datetime({ offset: true }).nullable().optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
