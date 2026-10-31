@@ -27,16 +27,19 @@ export function getPusherClient(): PusherClient | null {
     instance = new PusherClient(key, {
       cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER || "mt1",
       useTLS: true,
-      authorizer: (channel: string, options: unknown) => {
+      authorizer: (channel, _options) => {
         // Canaux privés/sprésents → signature serveur obligatoire.
-        const privateChannels = /^private-|^presence-/.test(channel);
-        if (!privateChannels) return undefined;
-        void options;
+        const isPrivate = /^private-|^presence-/.test(channel.name);
         return {
+          authorize: async () => "",
           authorizeSocket: async (
             authOptions: { socket_id: string; channel_name: string },
             callback: (error: string | null, data?: unknown) => void,
           ) => {
+            if (!isPrivate) {
+              callback(null, {});
+              return;
+            }
             try {
               const res = await fetch("/api/pusher/auth", {
                 method: "POST",

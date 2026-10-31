@@ -1,4 +1,4 @@
-import { Pusher } from "pusher";
+import Pusher from "pusher";
 import type { RealtimeEvent, PayloadFor } from "./events";
 
 /**
