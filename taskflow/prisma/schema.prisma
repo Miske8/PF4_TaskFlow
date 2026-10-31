@@ -1,0 +1,249 @@
+// ============================================================================
+// TaskFlow — Schéma Prisma (Étape 3)
+// PostgreSQL + stratégie de positions "fractional indexing" (order Float)
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Prisma 7 : l'URL de connexion ne vit plus dans le schéma mais dans
+// prisma.config.ts (migrations) et via l'adapter pg (client runtime).
+datasource db {
+  provider = "postgresql"
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum BoardRole {
+  OWNER
+  MEMBER
+}
+
+enum LabelColor {
+  GREY
+  RED
+  ORANGE
+  YELLOW
+  GREEN
+  BLUE
+  PURPLE
+  PINK
+}
+
+enum ActivityType {
+  BOARD_CREATED
+  BOARD_UPDATED
+  BOARD_DELETED
+  LIST_CREATED
+  LIST_RENAMED
+  LIST_DELETED
+  CARD_CREATED
+  CARD_UPDATED
+  CARD_MOVED
+  CARD_DELETED
+  CARD_COMMENTED
+  MEMBER_INVITED
+  MEMBER_REMOVED
+}
+
+// ----------------------------------------------------------------------------
+// Authentification & Utilisateurs
+// ----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique // contrainte d'unicité n°1 : 1 compte = 1 email
+  name         String
+  passwordHash String // bcrypt, jamais exposé dans les DTOs
+  image        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedBoards   Board[]        @relation("BoardOwner")
+  memberships   BoardMember[]
+  comments      Comment[]
+  createdLabels Label[]
+  activities    ActivityLog[]
+
+  @@index([email])
+}
+
+// ----------------------------------------------------------------------------
+// Tableaux & Collaboration
+// ----------------------------------------------------------------------------
+
+model Board {
+  id          String    @id @default(cuid())
+  name        String    @db.VarChar(100)
+  description String?   @db.VarChar(500)
+  isArchived  Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  ownerId String @map("owner_id")
+  owner   User   @relation("BoardOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  members     BoardMember[]
+  lists       List[]
+  labels      Label[]
+  activities  ActivityLog[]
+
+  @@index([ownerId])
+  @@index([ownerId, isArchived, updatedAt(sort: Desc)]) // dashboard : mes tableaux récents
+  @@map("boards")
+}
+
+/// Table de jointure User <-> Board avec rôle (OWNER / MEMBER).
+/// Un utilisateur ne peut être membre qu'une seule fois par board.
+model BoardMember {
+  id        String    @id @default(cuid())
+  role      BoardRole @default(MEMBER)
+  createdAt DateTime  @default(now())
+
+  userId  String @map("user_id")
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  boardId String @map("board_id")
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  @@unique([boardId, userId]) // contrainte d'unicité n°2 : pas de doublon de membre
+  @@index([userId])           // "mes tableaux" côté membre
+  @@index([boardId])
+  @@map("board_members")
+}
+
+// ----------------------------------------------------------------------------
+// Listes (colonnes) & Cartes — positions fractionnaires
+// ----------------------------------------------------------------------------
+
+/// Une liste appartient à un board. `order` est un flottant (fractional
+/// indexing) : insérer entre A(1) et B(2) => 1.5, sans renuméroter les voisins.
+model List {
+  id        String   @id @default(cuid())
+  title     String   @db.VarChar(80)
+  order     Float    @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  boardId String @map("board_id")
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  cards Card[]
+
+  @@index([boardId, order]) // lecture triée des colonnes d'un board
+  @@map("lists")
+}
+
+model Card {
+  id          String    @id @default(cuid())
+  title       String    @db.VarChar(120)
+  description String?   @db.Text
+  dueDate     DateTime? @map("due_date")
+  completedAt DateTime? @map("completed_at")
+  order       Float     @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  listId String @map("list_id")
+  list   List   @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  labels     CardLabel[]
+  comments   Comment[]
+  assignees  CardAssignee[]
+
+  @@index([listId, order]) // cartes triées d'une colonne (requête la plus chaude)
+  @@map("cards")
+}
+
+// ----------------------------------------------------------------------------
+// Labels (étiquettes) — scopées au board, N:N avec les cartes
+// ----------------------------------------------------------------------------
+
+model Label {
+  id    String     @id @default(cuid())
+  name  String     @db.VarChar(40)
+  color LabelColor
+
+  boardId String @map("board_id")
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  /// Créateur du label (trace de qui a défini l'étiquette du board)
+  createdByUserId String? @map("created_by_user_id")
+  createdByUser   User?   @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  cards CardLabel[]
+
+  @@unique([boardId, name]) // contrainte d'unicité n°3 : pas de doublon de nom par board
+  @@index([boardId])
+  @@map("labels")
+}
+
+/// Table de jointure pure Card <-> Label (suppression de l'un ou l'autre
+/// nettoie automatiquement l'association via Cascade bidirectionnel).
+model CardLabel {
+  cardId  String @map("card_id")
+  labelId String @map("label_id")
+
+  card  Card  @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  label Label @relation(fields: [labelId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([cardId, labelId]) // clé primaire composite = unicité naturelle
+  @@index([labelId])
+}
+
+// ----------------------------------------------------------------------------
+// Commentaires
+// ----------------------------------------------------------------------------
+
+model Comment {
+  id        String   @id @default(cuid())
+  content   String   @db.VarChar(2000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  cardId String @map("card_id")
+  card   Card   @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([cardId, createdAt]) // fil chronologique des commentaires d'une carte
+  @@map("comments")
+}
+
+/// Attribution de cartes à des membres (bonus MVP léger).
+model CardAssignee {
+  cardId String @map("card_id")
+  userId String @map("user_id")
+
+  card Card @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([cardId, userId])
+  @@index([userId])
+}
+
+// ----------------------------------------------------------------------------
+// Journal d'activité (optionnel — utile pour le temps réel et l'historique)
+// ----------------------------------------------------------------------------
+
+model ActivityLog {
+  id        String       @id @default(cuid())
+  type      ActivityType
+  payload   Json?        // données contextuelles (noms avant/après, ids…)
+  createdAt DateTime     @default(now())
+
+  boardId String @map("board_id")
+  board   Board  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+
+  actorId String? @map("actor_id")
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([boardId, createdAt(sort: Desc)]) // flux d'activité récent d'un board
+  @@map("activity_logs")
+}
